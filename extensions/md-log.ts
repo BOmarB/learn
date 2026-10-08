@@ -192,6 +192,12 @@ export default function mdLog(pi: ExtensionAPI) {
 			return `${a.index}. ${a.label}`;
 		});
 		if (body.length === 0) body.push("(no answer)");
+		if (details?.note) {
+			body.push("");
+			const noteLines = String(details.note).split("\n");
+			body.push(`Note: ${noteLines[0]}`);
+			for (let i = 1; i < noteLines.length; i++) body.push(noteLines[i]);
+		}
 		return callout("example", "Answer", body);
 	}
 

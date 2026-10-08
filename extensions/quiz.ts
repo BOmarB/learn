@@ -880,23 +880,29 @@ export default function quiz(pi: ExtensionAPI) {
 		description:
 			"Ask the user a GRADED question with a known correct answer, then instantly grade and give feedback. Unlike ask_user_question (which collects preferences/decisions with no right answer), quiz always has a correct answer supplied by you, marks the user's selection right/wrong (✓/✗), reveals the correct answer, and can show an explanation. Use it to (1) assess what the learner already understands before teaching, and (2) run tight practice/retrieval loops after explaining, or probe understanding whenever you're unsure they've got it. Options-only: single-select or multi-select, plus an automatic 'I don't know' choice so the user can signal a genuine gap instead of guessing. An always-present optional note field (Tab to focus it) lets the user attach a free-text note to ANY answer; it reaches you only when non-empty. No free-text answers — for non-graded questions use ask_user_question instead.",
 		promptSnippet:
-			"Use the quiz tool to test the user with a graded multiple-choice or multi-select question (required correct answer + required explanation). For non-graded questions, use ask_user_question.",
+			"Use the quiz tool to test the user with a graded multiple-choice or multi-select question (required correct answer + required explanation). Provide only the real answer options (at least two) — an 'I don't know' choice is appended to every quiz automatically, so never include one yourself. For non-graded questions, use ask_user_question.",
 		promptGuidelines: [
 			"quiz is GRADED; ask_user_question is not. If the question has a correct answer, use quiz. If you just need a preference, decision, or open-ended input, use ask_user_question.",
+			"correctAnswer must be objectively verifiable — a fact that is true regardless of who is answering. Never quiz self-reports or ratings like 'how well do you know X' or 'what's your relationship with this subject': the answer depends on the user, so any correct answer you supply is only an assumption, and grading a truthful self-report as wrong is a broken question. Use ask_user_question for anything about the user themselves.",
 			'correctAnswer is REQUIRED and is the option value, not a position number. Single-select: one string (e.g. "mercury"). Multi-select: an array of strings (e.g. ["belize", "niue"]).',
 			"Always pass the option's `value` string as correctAnswer — it is self-checking and prevents miscounting positions. A value that matches no option is a hard error.",
 			"explanation is REQUIRED — always say why the correct answer is correct.",
 			"Multi-select is graded as an exact-set match: the user is correct only if they select every correct option and no incorrect ones.",
 			"There is no free-text mode. An 'I don't know' choice is ALWAYS added automatically — provide ONLY the real, gradable options (at least two). Never add your own uncertainty/opt-out option like 'I don't know', 'I'm not sure', or 'Not sure'; that is handled for you and a manual one would be redundant or gradable-as-wrong.",
 			"If a result comes back as dontKnow, the user honestly did not know and did NOT guess — treat it as a genuine knowledge gap to teach into, not as a wrong answer.",
+			"A wrong answer marks a gap to TEACH, not just to explain: your explanation informs but does not repair it. The topic they missed must go through actual teaching — re-establish it, then re-check — before you move on; do not treat having explained it in the feedback as having taught it.",
+			"A correct answer confirms exactly this ONE fact — nothing around it. It is one data point closer to the user understanding the whole area, never proof they know the surrounding material: keep the remaining gaps in the plan and keep teaching them; don't collapse the area into 'known' after a single right answer.",
 			"Any answer (right, wrong, or 'I don't know') may carry an optional free-text `note` the user typed in the always-present note field. When present it reflects what they were thinking or unsure about — read it and let it steer your follow-up. It is omitted entirely when empty.",
-			"Treat each wrong answer (distractor) as a diagnostic probe, not just filler: make it a specific, believable mistake the user might actually hold — a common misconception, or an adjacent/easily-confused concept — so that WHICH wrong answer they pick reveals WHICH nuance of their understanding is off. You learn far more from a targeted wrong choice than from a binary right/wrong, and the choice tells you exactly which gap to teach into next (and what the explanation should address).",
+			"Treat each wrong answer (distractor) as a diagnostic probe, not just filler: make it a specific, believable mistake the user might actually hold — a common misconception, or an adjacent/easily-confused concept — so that WHICH wrong answer they pick reveals WHICH nuance of their understanding is off. You learn far more from a targeted wrong choice than from a binary right/wrong, and the choice tells you exactly which gap to teach into next (and what the explanation should address). For every distractor, be able to NAME the misconception it traps ('traps: thinks root knows all domains'); if you can't name it, the option is padding — add one that earns its place or cut the list down. Options that are obviously wrong filler ('the ocean is blue') insult the user and let them spot the answer without knowing anything.",
+			"Context-elimination test (run it before every quiz): could a smart person who skipped this entire lesson still eliminate options using common sense or general knowledge alone? If yes, the question is obvious and broken — rewrite it so that ONLY understanding the material you just taught selects the answer. Wrong options must be tempting to someone with partial knowledge, not laughable to everyone.",
+			"Follow-up rule: your grading feedback is teaching — explain the correct answer fully, that's good. But everything you disclose in an explanation is now visible on screen: the next quiz must NEVER ask for a fact you just printed (explanation says 'DNS stands for Domain Name System' -> do not follow with 'What does DNS stand for?'). If the next question touches anything mentioned in the previous question, answer, or explanation, it must go one level deeper — application, implication, mechanism, consequence — never verbatim recall of text the user just read.",
 			"Guardrail: every distractor must be unambiguously wrong on the intended reading — tempting, but a real error, not a defensible alternative. Don't drift into trick questions.",
 			"Anti-guessing hygiene: don't let the correct answer stand out by form (longest, most precise, most hedged, or the only one in the right format). Keep options similar in length, specificity, and phrasing so it can't be picked from shape alone.",
 			"Set multiSelect: true only when more than one option is correct.",
 			"Options are shuffled before display by default, so don't worry about which position you list the correct answer in. Set shuffle: false only when option order is meaningful (ordered values, or an 'All/None of the above' option that must stay last).",
 			"To probe nuance, ask several quick quiz questions and adapt each one based on the previous answers, rather than writing one giant question.",
 			"Don't leak the answer through formatting: keep option phrasing/length even and don't hint which is correct.",
+			"The question stem must withhold the answer too, not just the options: never ask through the answer term — 'which civilization ... Gardens of Babylon?' (answer: Babylon) or 'which system used cuneiform?' (answer: Cuneiform) is a giveaway. If copying a fragment of the stem onto an option makes it obviously right, rewrite the stem so the answer must be recalled, not pattern-matched.",
 		],
 		parameters: QuizParams,
 
@@ -950,6 +956,25 @@ export default function quiz(pi: ExtensionAPI) {
 
 			if (correctError) {
 				return unavailableResult(params.question, mode, `quiz ${correctError}`, correctIndices, context);
+			}
+
+			const leakTerms = [
+				...correctIndices.map((i) => options[i]?.label ?? ""),
+				...(Array.isArray(params.correctAnswer) ? params.correctAnswer : [params.correctAnswer]),
+			]
+				.map((t) => String(t).trim())
+				.filter((t) => t.length >= 4);
+			const leaked = leakTerms.find((t) =>
+				new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(params.question),
+			);
+			if (leaked) {
+				return unavailableResult(
+					params.question,
+					mode,
+					`quiz rejected: the correct answer ("${leaked}") appears in the question stem, so the question gives itself away. Rewrite it so the stem withholds the answer — ask around the fact, never through the answer term — then call quiz again.`,
+					correctIndices,
+					context,
+				);
 			}
 
 			if (!ctx.hasUI) {

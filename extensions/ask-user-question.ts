@@ -53,6 +53,7 @@ interface AskUserQuestionResultDetails {
 	mode: AskUserQuestionMode;
 	answers: AskAnswer[];
 	message?: string;
+	note?: string;
 }
 
 const OptionSchema = Type.Object({
@@ -157,6 +158,7 @@ function buildStructuredResult(
 	answers: AskAnswer[],
 	context?: string,
 	message?: string,
+	note?: string,
 ) {
 	return {
 		status,
@@ -165,6 +167,7 @@ function buildStructuredResult(
 		mode,
 		answers,
 		message,
+		note,
 	} as AskUserQuestionResultDetails;
 }
 
@@ -183,7 +186,7 @@ function unavailableResult(question: string, mode: AskUserQuestionMode, message:
 	};
 }
 
-function buildResult(question: string, context: string | undefined, mode: AskUserQuestionMode, answers: AskAnswer[]) {
+function buildResult(question: string, context: string | undefined, mode: AskUserQuestionMode, answers: AskAnswer[], note?: string) {
 	let text: string;
 	if (mode === "text") {
 		const answer = answers[0];
@@ -193,11 +196,33 @@ function buildResult(question: string, context: string | undefined, mode: AskUse
 	} else {
 		text = `User selected:\n${answers.map((answer) => `- ${formatAnswerForModel(answer)}`).join("\n")}`;
 	}
+	if (note) text += `\nUser's note: ${note}`;
 
 	return {
 		content: [{ type: "text" as const, text }],
-		details: buildStructuredResult("answered", question, mode, answers, context),
+		details: buildStructuredResult("answered", question, mode, answers, context, undefined, note),
 	};
+}
+
+// Persistent, always-present note field rendered under the options. Applies to
+// ANY answer and is only surfaced to the agent when non-empty.
+function pushNoteField(lines: string[], theme: any, width: number, editor: Editor, focused: boolean): void {
+	lines.push("");
+	const label = focused ? theme.fg("accent", "Note (optional):") : theme.fg("muted", "Note (optional):");
+	addWrapped(lines, label, width, " ");
+	for (const line of editor.render(width)) lines.push(line);
+}
+
+// Build the note Editor. `disableSubmit` is set because Enter must NOT submit
+// here: the editor's submit path clears the buffer, which would wipe the note.
+// Instead the host intercepts Enter to return focus to the options while
+// keeping the text. Ctrl+J still inserts a newline (pi convention), so
+// multi-line notes work.
+function makeNoteEditor(tui: any, theme: any): Editor {
+	const editor = new Editor(tui, createEditorTheme(theme));
+	editor.focused = false;
+	editor.disableSubmit = true;
+	return editor;
 }
 
 async function askSingleChoice(
@@ -205,29 +230,42 @@ async function askSingleChoice(
 	question: string,
 	context: string | undefined,
 	options: AskOption[],
-): Promise<AskAnswer | null> {
+): Promise<{ answer: AskAnswer; note?: string } | null> {
 	const otherLabel = getOtherLabel(options);
 	const allOptions: DisplayOption[] = [
 		...options.map((option, index) => ({ ...option, id: `option:${index}`, index: index + 1 })),
 		{ id: "other", label: otherLabel, value: "__other__", isOther: true },
 	];
 
-	return ctx.ui.custom<AskAnswer | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer | null) => void) => {
+	return ctx.ui.custom<{ answer: AskAnswer; note?: string } | null>((tui: any, theme: any, _kb: any, done: (result: { answer: AskAnswer; note?: string } | null) => void) => {
 		let optionIndex = 0;
 		let editMode = false;
+		let focus: "options" | "note" = "options";
 		let cachedLines: string[] | undefined;
 		let cachedWidth = -1;
 		const editor = new Editor(tui, createEditorTheme(theme));
+		const noteEditor = makeNoteEditor(tui, theme);
 
 		editor.onSubmit = (value) => {
 			const trimmed = value.trim();
 			if (!trimmed) return;
-			done({ type: "other", label: trimmed, value: trimmed });
+			done({ answer: { type: "other", label: trimmed, value: trimmed }, note: noteText() });
 		};
 
 		function refresh() {
 			cachedLines = undefined;
 			tui.requestRender();
+		}
+
+		function noteText(): string | undefined {
+			const t = noteEditor.getText().trim();
+			return t.length ? t : undefined;
+		}
+
+		function toOptions() {
+			focus = "options";
+			noteEditor.focused = false;
+			refresh();
 		}
 
 		function handleInput(data: string) {
@@ -240,6 +278,27 @@ async function askSingleChoice(
 				}
 				editor.handleInput(data);
 				refresh();
+				return;
+			}
+
+			// Tab toggles focus between the options list and the note field.
+			if (matchesKey(data, Key.tab)) {
+				focus = focus === "options" ? "note" : "options";
+				noteEditor.focused = focus === "note";
+				refresh();
+				return;
+			}
+
+			if (focus === "note") {
+				// Enter and Esc both return to the options and keep the note text.
+				// (Enter must be intercepted here: the editor's own submit clears
+				// the buffer. Ctrl+J still reaches the editor as a newline.)
+				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
+					toOptions();
+					return;
+				}
+				noteEditor.handleInput(data);
+				tui.requestRender();
 				return;
 			}
 
@@ -262,10 +321,8 @@ async function askSingleChoice(
 					return;
 				}
 				done({
-					type: "option",
-					label: selected.label,
-					value: selected.value,
-					index: selected.index!,
+					answer: { type: "option", label: selected.label, value: selected.value, index: selected.index! },
+					note: noteText(),
 				});
 				return;
 			}
@@ -313,13 +370,21 @@ async function askSingleChoice(
 				lines.push("");
 				add(theme.fg("dim", " Enter to submit • Esc to go back"));
 			} else {
+				pushNoteField(lines, theme, width, noteEditor, focus === "note");
 				lines.push("");
-				add(theme.fg("dim", " ↑↓ navigate • Enter select • Esc cancel"));
+				if (focus === "note") {
+					add(theme.fg("dim", " Type note • Ctrl+J newline • Enter back to options • Tab options • Esc back"));
+				} else {
+					add(theme.fg("dim", " ↑↓ navigate • Enter select • Tab note • Esc cancel"));
+				}
 			}
 
 			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
+			// Not cached when the note is focused: the editor renders a live cursor.
+			if (!editMode && focus !== "note") {
+				cachedLines = lines;
+				cachedWidth = width;
+			}
 			return lines;
 		}
 
@@ -338,7 +403,7 @@ async function askMultiChoice(
 	question: string,
 	context: string | undefined,
 	options: AskOption[],
-): Promise<AskAnswer[] | null> {
+): Promise<{ answers: AskAnswer[]; note?: string } | null> {
 	const otherLabel = getOtherLabel(options);
 	const choiceItems: DisplayOption[] = options.map((option, index) => ({
 		...option,
@@ -352,13 +417,15 @@ async function askMultiChoice(
 		submitItem,
 	];
 
-	return ctx.ui.custom<AskAnswer[] | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer[] | null) => void) => {
+	return ctx.ui.custom<{ answers: AskAnswer[]; note?: string } | null>((tui: any, theme: any, _kb: any, done: (result: { answers: AskAnswer[]; note?: string } | null) => void) => {
 		let optionIndex = 0;
 		let editMode = false;
+		let focus: "options" | "note" = "options";
 		let cachedLines: string[] | undefined;
 		let cachedWidth = -1;
 		const selected = new Map<string, AskAnswer>();
 		const editor = new Editor(tui, createEditorTheme(theme));
+		const noteEditor = makeNoteEditor(tui, theme);
 
 		editor.onSubmit = (value) => {
 			const trimmed = value.trim();
@@ -371,6 +438,17 @@ async function askMultiChoice(
 		function refresh() {
 			cachedLines = undefined;
 			tui.requestRender();
+		}
+
+		function noteText(): string | undefined {
+			const t = noteEditor.getText().trim();
+			return t.length ? t : undefined;
+		}
+
+		function toOptions() {
+			focus = "options";
+			noteEditor.focused = false;
+			refresh();
 		}
 
 		function toggleOption(item: DisplayOption) {
@@ -397,6 +475,27 @@ async function askMultiChoice(
 				}
 				editor.handleInput(data);
 				refresh();
+				return;
+			}
+
+			// Tab toggles focus between the options list and the note field.
+			if (matchesKey(data, Key.tab)) {
+				focus = focus === "options" ? "note" : "options";
+				noteEditor.focused = focus === "note";
+				refresh();
+				return;
+			}
+
+			if (focus === "note") {
+				// Enter and Esc both return to the options and keep the note text.
+				// (Enter must be intercepted here: the editor's own submit clears
+				// the buffer. Ctrl+J still reaches the editor as a newline.)
+				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
+					toOptions();
+					return;
+				}
+				noteEditor.handleInput(data);
+				tui.requestRender();
 				return;
 			}
 
@@ -432,7 +531,7 @@ async function askMultiChoice(
 			if (matchesKey(data, Key.enter)) {
 				if (current.isSubmit) {
 					if (selected.size > 0) {
-						done(sortAnswers(Array.from(selected.values())));
+						done({ answers: sortAnswers(Array.from(selected.values())), note: noteText() });
 					}
 					return;
 				}
@@ -519,12 +618,21 @@ async function askMultiChoice(
 				if (selected.size === 0) {
 					add(theme.fg("warning", " Select at least one answer before submitting."));
 				}
-				add(theme.fg("dim", " ↑↓ navigate • Space toggle • Enter edit/submit • Esc cancel"));
+				pushNoteField(lines, theme, width, noteEditor, focus === "note");
+				lines.push("");
+				if (focus === "note") {
+					add(theme.fg("dim", " Type note • Ctrl+J newline • Enter back to options • Tab options • Esc back"));
+				} else {
+					add(theme.fg("dim", " ↑↓ navigate • Space toggle • Enter edit/submit • Tab note • Esc cancel"));
+				}
 			}
 
 			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
+			// Not cached when the note is focused: the editor renders a live cursor.
+			if (!editMode && focus !== "note") {
+				cachedLines = lines;
+				cachedWidth = width;
+			}
 			return lines;
 		}
 
@@ -570,9 +678,9 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 		name: "ask_user_question",
 		label: "ask_user_question",
 		description:
-			"Ask the user a single question and pause execution until they answer. Use this when requirements are ambiguous, user preferences are needed, a decision would materially affect implementation, or you need confirmation before proceeding. Ask exactly one question per tool call, and prefer multiple separate tool calls over bundling unrelated questions together.",
+			"Ask the user a single question and pause execution until they answer. Use this when requirements are ambiguous, user preferences are needed, a decision would materially affect implementation, or you need confirmation before proceeding. Ask exactly one question per tool call, and prefer multiple separate tool calls over bundling unrelated questions together. Prefer passing `options` whenever the possible answers can be enumerated — they render as a selectable list with an optional free-text note field; reserve the plain text mode for questions with no enumerable answers.",
 		promptSnippet:
-			"Use this tool to ask exactly one clarifying question, missing-requirement question, preference question, or decision question before continuing.",
+			"Use this tool to ask exactly one clarifying question, missing-requirement question, preference question, or decision question before continuing. When options are shown, an always-present note field (Tab to focus) lets the user attach free-text context to any answer; it reaches you only when non-empty.",
 		promptGuidelines: [
 			"Ask exactly one question per tool call.",
 			"If you need answers to multiple questions, make multiple separate ask_user_question tool calls instead of combining them into one prompt.",
@@ -580,6 +688,8 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 			"Use multiSelect: true only when you need multiple answers to the same question.",
 			'If you recommend a specific option, make it the first option in the list and add "(Recommended)" at the end of the label.',
 			"Prefer this tool over guessing when requirements, preferences, or implementation choices are unclear.",
+			"If your question enumerates possible answers in prose (e.g. \"...e.g. A, B, C, or something else?\"), pass those choices as `options` instead of listing them in the question text — a prose enumeration hides the answer list from the picker and skips the note field. Plain text mode (no options) is only for questions whose answers genuinely cannot be enumerated.",
+			"When options are shown, any answer may carry an optional free-text note the user typed in the always-present note field (Tab to focus it). When present, it reflects what the user was thinking or unsure about — read it and let it steer your follow-up. It is omitted entirely when empty.",
 			"Use this tool when multiple valid implementation paths exist and the preferred path depends on user choice.",
 		],
 		parameters: AskUserQuestionParams,
@@ -610,18 +720,18 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 				}
 
 				if (mode === "single-select") {
-					const answer = await askSingleChoice(ctx, params.question, context, options);
-					if (!answer) {
+					const res = await askSingleChoice(ctx, params.question, context, options);
+					if (!res) {
 						return cancelledResult(params.question, mode, context);
 					}
-					return buildResult(params.question, context, mode, [answer]);
+					return buildResult(params.question, context, mode, [res.answer], res.note);
 				}
 
-				const answers = await askMultiChoice(ctx, params.question, context, options);
-				if (!answers) {
+				const res = await askMultiChoice(ctx, params.question, context, options);
+				if (!res) {
 					return cancelledResult(params.question, mode, context);
 				}
-				return buildResult(params.question, context, mode, answers);
+				return buildResult(params.question, context, mode, res.answers, res.note);
 			});
 		},
 
@@ -663,6 +773,9 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 						return `${theme.fg("success", "✓ ")}${theme.fg("accent", `${answer.index}. ${answer.label}`)}`;
 				}
 			});
+			if (details.note) {
+				for (const line of String(details.note).split("\n")) lines.push(theme.fg("muted", `Note: ${line}`));
+			}
 			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
