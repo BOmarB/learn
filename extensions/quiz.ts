@@ -895,6 +895,7 @@ export default function quiz(pi: ExtensionAPI) {
 			"Any answer (right, wrong, or 'I don't know') may carry an optional free-text `note` the user typed in the always-present note field. When present it reflects what they were thinking or unsure about — read it and let it steer your follow-up. It is omitted entirely when empty.",
 			"Treat each wrong answer (distractor) as a diagnostic probe, not just filler: make it a specific, believable mistake the user might actually hold — a common misconception, or an adjacent/easily-confused concept — so that WHICH wrong answer they pick reveals WHICH nuance of their understanding is off. You learn far more from a targeted wrong choice than from a binary right/wrong, and the choice tells you exactly which gap to teach into next (and what the explanation should address). For every distractor, be able to NAME the misconception it traps ('traps: thinks root knows all domains'); if you can't name it, the option is padding — add one that earns its place or cut the list down. Options that are obviously wrong filler ('the ocean is blue') insult the user and let them spot the answer without knowing anything.",
 			"Context-elimination test (run it before every quiz): could a smart person who skipped this entire lesson still eliminate options using common sense or general knowledge alone? If yes, the question is obvious and broken — rewrite it so that ONLY understanding the material you just taught selects the answer. Wrong options must be tempting to someone with partial knowledge, not laughable to everyone.",
+			"Distractor neighborhood (lesson-relative): all options must sit in the same conceptual neighborhood as the correct answer — same vocabulary, same lesson topic, plausible to someone who just heard this lesson (a parameters question's wrongs are the code/architecture, the data, the loss — not 'the hardware' or 'the programming language'). Every option should use the lesson's own terms, so that 'which one mentions what he said?' can never select the answer. Run it as a test: cover what you just taught — if the correct option is the only one connected to it and the rest are outside categories, the question tests association, not understanding; regenerate.",
 			"Follow-up rule: your grading feedback is teaching — explain the correct answer fully, that's good. But everything you disclose in an explanation is now visible on screen: the next quiz must NEVER ask for a fact you just printed (explanation says 'DNS stands for Domain Name System' -> do not follow with 'What does DNS stand for?'). If the next question touches anything mentioned in the previous question, answer, or explanation, it must go one level deeper — application, implication, mechanism, consequence — never verbatim recall of text the user just read.",
 			"Guardrail: every distractor must be unambiguously wrong on the intended reading — tempting, but a real error, not a defensible alternative. Don't drift into trick questions.",
 			"Anti-guessing hygiene: don't let the correct answer stand out by form (longest, most precise, most hedged, or the only one in the right format). Keep options similar in length, specificity, and phrasing so it can't be picked from shape alone.",
@@ -975,6 +976,26 @@ export default function quiz(pi: ExtensionAPI) {
 					correctIndices,
 					context,
 				);
+			}
+
+			// HARD GUARD — length parity: every option must be parallel in
+			// length so the answer can't be spotted by form (the longest, most
+			// detailed option is otherwise always the correct one).
+			const wordCount = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
+			const contentOptions = options.filter((o) => !/^(all|none) of the above$/i.test(o.label.trim()));
+			if (contentOptions.length >= 2) {
+				const counts = contentOptions.map((o) => wordCount(o.label));
+				const longest = Math.max(...counts);
+				const shortest = Math.min(...counts);
+				if (shortest > 0 && longest > 2 * shortest) {
+					return unavailableResult(
+						params.question,
+						mode,
+						`quiz rejected: options are uneven in length (longest ${longest} words vs shortest ${shortest} words — over 2x), so the answer stands out by form. Rewrite so every option is parallel in length, specificity, and phrasing — same skeleton, same grain — then call quiz again.`,
+						correctIndices,
+						context,
+					);
+				}
 			}
 
 			if (!ctx.hasUI) {
