@@ -27,9 +27,21 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const QA_TOOLS = new Set(["quiz", "ask_user_question"]);
+
+function setVizDir(logPath: string): void {
+	const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "viz-dir.txt"), path.join(path.dirname(logPath), "viz"), "utf8");
+}
+
+function clearVizDir(): void {
+	const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+	fs.rmSync(path.join(agentDir, "viz-dir.txt"), { force: true });
+}
 
 export default function mdLog(pi: ExtensionAPI) {
 	let logFile: string | null = null;
@@ -45,6 +57,8 @@ export default function mdLog(pi: ExtensionAPI) {
 		}
 		if (lastLinkData?.file) {
 			logFile = lastLinkData.file;
+			process.env.PI_VIZ_DIR = path.join(path.dirname(logFile), "viz");
+			setVizDir(logFile);
 			const theme = ctx.ui.theme;
 			ctx.ui.setStatus(
 				"md-log",
@@ -312,6 +326,8 @@ export default function mdLog(pi: ExtensionAPI) {
 			}
 
 			logFile = resolved;
+			process.env.PI_VIZ_DIR = path.join(path.dirname(resolved), "viz");
+			setVizDir(resolved);
 			pi.appendEntry("md-log", { file: resolved });
 
 			// Backfill the active branch.
@@ -335,6 +351,8 @@ export default function mdLog(pi: ExtensionAPI) {
 			}
 			const name = path.basename(logFile);
 			logFile = null;
+			delete process.env.PI_VIZ_DIR;
+			clearVizDir();
 			pi.appendEntry("md-log", { file: null });
 			ctx.ui.setStatus("md-log", undefined);
 			ctx.ui.notify(`Unlinked: ${name}`, "info");

@@ -9,8 +9,8 @@
  */
 
 import { spawn } from "node:child_process"
-import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { homedir, tmpdir } from "node:os"
+import { basename, delimiter, dirname, join } from "node:path"
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 
 // rsvg-convert lives under MacPorts (/opt/local/bin); magick/gs under
@@ -46,7 +46,8 @@ export function run(
   opts: { cwd: string; timeoutMs: number; env?: Record<string, string> },
 ): Promise<RunResult> {
   return new Promise((resolveRun) => {
-    const augmentedPath = [...EXTRA_PATH, process.env.PATH ?? ""].join(":")
+    const extra = process.platform === "win32" ? [] : EXTRA_PATH
+    const augmentedPath = [...extra, process.env.PATH ?? ""].join(delimiter)
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: { ...process.env, ...(opts.env ?? {}), PATH: augmentedPath },
@@ -130,9 +131,15 @@ export function snippetAround(content: string, index: number, contextLines = 3):
   return out.join("\n")
 }
 
-/** Copy a rendered PNG into <cwd>/viz with a unique, slugified name. */
+/** Copy a rendered PNG into $PI_VIZ_DIR (the md-log note's viz folder) or <cwd>/viz. */
 export function publish(pngPath: string, slug: string): { filename: string; path: string } {
-  const filesDir = join(process.cwd(), FILES_DIRNAME)
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")
+  const vizDirFile = join(agentDir, "viz-dir.txt")
+  let configured = ""
+  try {
+    if (existsSync(vizDirFile)) configured = readFileSync(vizDirFile, "utf8").trim()
+  } catch {}
+  const filesDir = process.env.PI_VIZ_DIR || configured || join(process.cwd(), FILES_DIRNAME)
   mkdirSync(filesDir, { recursive: true })
   const clean =
     slug
